@@ -322,6 +322,11 @@ document.getElementById("cfg-name-a").value  = cfg.boardNameA;
 document.getElementById("cfg-id-b").value    = cfg.boardIdB;
 document.getElementById("cfg-name-b").value  = cfg.boardNameB;
 
+function persistBoardNames() {
+  localStorage.setItem("ll_name_a", cfg.boardNameA);
+  localStorage.setItem("ll_name_b", cfg.boardNameB);
+}
+
 // ── Palette ───────────────────────────────────────────────────
 const PALETTE = [
   [255,200,80],[255,160,0],[255,120,0],[255,60,0],
@@ -688,6 +693,18 @@ document.getElementById("cfg-toggle").addEventListener("click", () => {
   document.getElementById("cfg-panel").classList.toggle("open");
 });
 
+document.getElementById("cfg-name-a").addEventListener("input", function() {
+  cfg.boardNameA = this.value.trim() || "A";
+  persistBoardNames();
+  updatePills();
+});
+
+document.getElementById("cfg-name-b").addEventListener("input", function() {
+  cfg.boardNameB = this.value.trim() || "B";
+  persistBoardNames();
+  updatePills();
+});
+
 document.getElementById("btn-add-network").addEventListener("click", () => {
   const ssid     = document.getElementById("new-ssid").value.trim();
   const password = document.getElementById("new-password").value;
@@ -712,9 +729,8 @@ document.getElementById("btn-reconnect").addEventListener("click", () => {
   localStorage.setItem("ll_leds",   cfg.numLeds);
   localStorage.setItem("ll_groups", cfg.numGroups);
   localStorage.setItem("ll_id_a",   cfg.boardIdA);
-  localStorage.setItem("ll_name_a", cfg.boardNameA);
   localStorage.setItem("ll_id_b",   cfg.boardIdB);
-  localStorage.setItem("ll_name_b", cfg.boardNameB);
+  persistBoardNames();
   initGroups(cfg.numGroups);
   updatePills();
   renderAll(); connect();
