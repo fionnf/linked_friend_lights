@@ -157,6 +157,19 @@ Hosted on GitHub Pages. Open it on any phone or browser — settings and scenes 
 | **Fade Speed** | How long colour transitions take (steps slider) |
 | **Drift Every** | How many seconds between autonomous drift events |
 
+### Google Home (on/off only)
+
+The firmware now exposes a simple MQTT on/off interface:
+
+- Command topic: `YOUR_PREFIX/power/set` (`ON` / `OFF`)
+- State topic: `YOUR_PREFIX/power/state` (`ON` / `OFF`, retained)
+
+It also publishes Home Assistant MQTT discovery at:
+
+- `homeassistant/switch/YOUR_PREFIX_light/config` (retained)
+
+So if you use Home Assistant with Google Home, the lamps can be controlled by voice as an on/off switch only.
+
 ### Strip preview
 
 The top card shows the LED strip in real time. Click the divider cells below the strip to set group boundaries — where one colour zone ends and the next begins.

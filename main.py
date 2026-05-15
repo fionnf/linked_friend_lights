@@ -31,6 +31,9 @@ from colour  import ColourEngine
 # All boards publish to and subscribe from the same shared topic.
 # They ignore messages that carry their own BOARD_ID (echo prevention).
 TOPIC_EVENTS = (MQTT_TOPIC_PREFIX + "/events").encode()
+TOPIC_POWER_SET = (MQTT_TOPIC_PREFIX + "/power/set").encode()
+TOPIC_POWER_STATE = (MQTT_TOPIC_PREFIX + "/power/state").encode()
+TOPIC_HA_SWITCH_CONFIG = ("homeassistant/switch/" + MQTT_TOPIC_PREFIX + "_light/config").encode()
 
 # ── Module-level objects ─────────────────────────────────────
 strip  = SK6812(pin=LED_PIN, num_leds=NUM_LEDS, brightness=LED_BRIGHTNESS)
@@ -104,8 +107,55 @@ def connect_wifi(tick=None):
 
 # ── MQTT ─────────────────────────────────────────────────────
 
+def publish_power_state():
+    """Publish retained ON/OFF state for assistant integrations."""
+    global client
+    if client is None:
+        return
+    try:
+        state = b"ON" if engine._powered_on else b"OFF"
+        client.publish(TOPIC_POWER_STATE, state, retain=True)
+    except Exception as e:
+        print(f"[mqtt] power state publish error: {e}")
+        client = None
+
+def publish_ha_switch_discovery():
+    """Publish Home Assistant MQTT discovery for a simple on/off light switch."""
+    global client
+    if client is None:
+        return
+    payload = {
+        "name": "Linked Friend Lights",
+        "unique_id": MQTT_TOPIC_PREFIX + "_light",
+        "command_topic": MQTT_TOPIC_PREFIX + "/power/set",
+        "state_topic": MQTT_TOPIC_PREFIX + "/power/state",
+        "payload_on": "ON",
+        "payload_off": "OFF",
+        "icon": "mdi:lightbulb-group",
+    }
+    try:
+        client.publish(TOPIC_HA_SWITCH_CONFIG, ujson.dumps(payload), retain=True)
+    except Exception as e:
+        print(f"[mqtt] discovery publish error: {e}")
+        client = None
+
 def on_message(topic, msg):
     """Called by the MQTT library when a message arrives."""
+    if topic == TOPIC_POWER_SET:
+        try:
+            cmd = msg.decode("utf-8", "ignore").strip().lower()
+        except Exception:
+            return
+        if cmd in ("on", "1", "true"):
+            engine.set_power(True)
+        elif cmd in ("off", "0", "false"):
+            engine.set_power(False)
+        else:
+            print(f"[mqtt] ignored power cmd: {cmd}")
+            return
+        publish_event({"on": engine._powered_on})
+        return
+
     try:
         data = ujson.loads(msg)
     except Exception:
@@ -134,6 +184,7 @@ def on_message(topic, msg):
 
     if on is not None:
         engine.set_power(bool(on))
+        publish_power_state()
     if brightness is not None:
         engine.set_brightness(float(brightness))
     if reverse is not None:
@@ -180,7 +231,12 @@ def connect_mqtt() -> MQTTClient:
     c.set_callback(on_message)
     c.connect()
     c.subscribe(TOPIC_EVENTS)
+    c.subscribe(TOPIC_POWER_SET)
     print(f"[mqtt] connected — client_id={client_id}, topic={TOPIC_EVENTS}")
+    global client
+    client = c
+    publish_ha_switch_discovery()
+    publish_power_state()
     return c
 
 
@@ -192,6 +248,8 @@ def publish_event(payload: dict):
     payload["from"] = BOARD_ID
     try:
         client.publish(TOPIC_EVENTS, ujson.dumps(payload))
+        if "on" in payload:
+            publish_power_state()
     except Exception as e:
         print(f"[mqtt] publish error: {e}")
         client = None   # trigger reconnect
