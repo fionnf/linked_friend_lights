@@ -976,7 +976,8 @@ function setStatus(cls, text) {
   ["btn-tap","btn-power","btn-reset","btn-drift","btn-save-board-lib","btn-apply-custom","btn-reboot","btn-add-network"].forEach(id => {
     document.getElementById(id).disabled = !ok;
   });
-  document.querySelectorAll(".anim-tile").forEach(btn => { btn.disabled = !ok; });
+  // Anim tiles work for local preview when disconnected; publish() no-ops if not connected
+  document.querySelectorAll(".anim-tile").forEach(btn => { btn.disabled = false; });
 }
 
 function connect() {
@@ -1149,7 +1150,7 @@ function syncAnimButtons() {
   document.querySelectorAll(".anim-tile").forEach(btn => {
     btn.classList.toggle("active", btn.dataset.mode === animMode);
   });
-  if (animMode) startAnimLoop(); else { stopAnimLoop(); renderStrip(); }
+  if (animMode && powered) startAnimLoop(); else { stopAnimLoop(); renderStrip(); }
 }
 function syncAnimSlider() {
   document.getElementById("sl-anim-speed").value = Math.round(animSpeed * 10);
@@ -1271,7 +1272,7 @@ function _animFrame(ts) {
   const groups = getGroups();
   const customP = animMode === "custom" ? getCustomParams() : null;
   for (let i = 0; i < _ledCache.length; i++) {
-    _ledCache[i].style.background = _ledColour(i, groups, customP);
+    _ledCache[i].style.background = powered ? _ledColour(i, groups, customP) : "#111";
   }
   _animFrameId = requestAnimationFrame(_animFrame);
 }
