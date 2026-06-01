@@ -897,7 +897,7 @@ const boardLastChange = {};
 const BOARD_TIMEOUT_MS = 90_000;
 let animMode    = "";
 let animSpeed   = 3.0;
-let alarms      = [];
+let alarms      = (() => { try { return JSON.parse(localStorage.getItem("ll_alarms") || "[]"); } catch(e) { return []; } })();
 let sendTarget  = "both";  // "both" | cfg.boardIdA | cfg.boardIdB
 let boardLib    = {};      // animations stored on board: {name: entry}
 
@@ -980,12 +980,15 @@ function setStatus(cls, text) {
   document.querySelectorAll(".anim-tile").forEach(btn => { btn.disabled = false; });
 }
 
+let _alarmsFromBroker = false;
+
 function connect() {
   if (client) { try { client.end(true); } catch(e) {} }
   setStatus("connecting", "connecting…");
   client = mqtt.connect(cfg.broker, { clientId: "webui_"+Math.random().toString(16).slice(2), clean: true });
   client.on("connect", () => {
     _wasConnected = true;
+    _alarmsFromBroker = false;
     setStatus("connected", cfg.broker.replace(/^wss?:\/\//,"").replace(/\/mqtt$/,""));
     client.subscribe(topic());
     client.subscribe(topicScenes());
@@ -999,6 +1002,13 @@ function connect() {
         boardIdB: cfg.boardIdB, boardNameB: cfg.boardNameB,
       }), 400);
     }
+    // If broker returns no retained alarms within 1.5s, push our local copy
+    setTimeout(() => {
+      if (!_alarmsFromBroker && alarms.length > 0) {
+        publishRetained(topicAlarms, alarms);
+        publish({ set_alarms: alarms });
+      }
+    }, 1500);
     // Request the board's saved animation library
     setTimeout(requestBoardLib, 1500);
   });
@@ -1008,7 +1018,32 @@ function connect() {
       const d = JSON.parse(msg.toString());
 
       if (topicStr === topicScenes()) {
-        if (d.scenes)  { localStorage.setItem("ll_scenes", JSON.stringify(d.scenes)); renderScenes(); }
+        if (d.scenes !== undefined) {
+          const remote = Array.isArray(d.scenes) ? d.scenes : [];
+          const local  = loadScenes();
+          if (remote.length === 0 && local.length > 0) {
+            // Broker has no scenes (e.g. broker restarted) — push our local copy back
+            setTimeout(() => publishRetained(topicScenes, {
+              scenes: local,
+              boardIdA: cfg.boardIdA, boardNameA: cfg.boardNameA,
+              boardIdB: cfg.boardIdB, boardNameB: cfg.boardNameB,
+            }), 200);
+          } else if (remote.length > 0) {
+            // Remote wins for scenes with the same name; keep local-only scenes
+            const remoteNames = new Set(remote.map(s => s.name));
+            const merged = [...remote, ...local.filter(s => !remoteNames.has(s.name))];
+            localStorage.setItem("ll_scenes", JSON.stringify(merged));
+            // If we added local-only scenes, push merged copy back so all devices have them
+            if (merged.length > remote.length) {
+              setTimeout(() => publishRetained(topicScenes, {
+                scenes: merged,
+                boardIdA: cfg.boardIdA, boardNameA: cfg.boardNameA,
+                boardIdB: cfg.boardIdB, boardNameB: cfg.boardNameB,
+              }), 200);
+            }
+          }
+          renderScenes();
+        }
         if (d.presets) { /* legacy — ignore */ }
         if (d.boardNameA) { cfg.boardNameA = d.boardNameA; localStorage.setItem("ll_name_a", d.boardNameA); }
         if (d.boardNameB) { cfg.boardNameB = d.boardNameB; localStorage.setItem("ll_name_b", d.boardNameB); }
@@ -1020,7 +1055,12 @@ function connect() {
       }
 
       if (topicStr === topicAlarms()) {
-        if (Array.isArray(d)) { alarms = d; renderAlarms(); }
+        if (Array.isArray(d)) {
+          _alarmsFromBroker = true;
+          alarms = d;
+          localStorage.setItem("ll_alarms", JSON.stringify(alarms));
+          renderAlarms();
+        }
         return;
       }
 
@@ -1766,6 +1806,7 @@ function defaultAlarm() {
 }
 
 function publishAlarms() {
+  localStorage.setItem("ll_alarms", JSON.stringify(alarms));
   publishRetained(topicAlarms, alarms);
   publish({ set_alarms: alarms });
 }
