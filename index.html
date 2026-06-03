@@ -981,6 +981,7 @@ function setStatus(cls, text) {
 }
 
 let _alarmsFromBroker = false;
+let _scenesFromBroker = false;
 
 function connect() {
   if (client) { try { client.end(true); } catch(e) {} }
@@ -989,6 +990,7 @@ function connect() {
   client.on("connect", () => {
     _wasConnected = true;
     _alarmsFromBroker = false;
+    _scenesFromBroker = false;
     setStatus("connected", cfg.broker.replace(/^wss?:\/\//,"").replace(/\/mqtt$/,""));
     client.subscribe(topic());
     client.subscribe(topicScenes());
@@ -1002,11 +1004,21 @@ function connect() {
         boardIdB: cfg.boardIdB, boardNameB: cfg.boardNameB,
       }), 400);
     }
-    // If broker returns no retained alarms within 1.5s, push our local copy
+    // If broker returns no retained data within 1.5s, push our local copies
     setTimeout(() => {
       if (!_alarmsFromBroker && alarms.length > 0) {
         publishRetained(topicAlarms, alarms);
         publish({ set_alarms: alarms });
+      }
+      if (!_scenesFromBroker) {
+        const local = loadScenes();
+        if (local.length > 0) {
+          publishRetained(topicScenes, {
+            scenes: local,
+            boardIdA: cfg.boardIdA, boardNameA: cfg.boardNameA,
+            boardIdB: cfg.boardIdB, boardNameB: cfg.boardNameB,
+          });
+        }
       }
     }, 1500);
     // Request the board's saved animation library
@@ -1018,29 +1030,28 @@ function connect() {
       const d = JSON.parse(msg.toString());
 
       if (topicStr === topicScenes()) {
+        _scenesFromBroker = true;
         if (d.scenes !== undefined) {
           const remote = Array.isArray(d.scenes) ? d.scenes : [];
           const local  = loadScenes();
-          if (remote.length === 0 && local.length > 0) {
-            // Broker has no scenes (e.g. broker restarted) — push our local copy back
+          // Local always wins for same-named scenes; remote adds scenes we don't have
+          const localNames = new Set(local.map(s => s.name));
+          const merged = [...local, ...remote.filter(s => !localNames.has(s.name))];
+          if (merged.length > local.length) {
+            // Remote had scenes we didn't — save them and push authoritative copy back
+            localStorage.setItem("ll_scenes", JSON.stringify(merged));
+            setTimeout(() => publishRetained(topicScenes, {
+              scenes: merged,
+              boardIdA: cfg.boardIdA, boardNameA: cfg.boardNameA,
+              boardIdB: cfg.boardIdB, boardNameB: cfg.boardNameB,
+            }), 200);
+          } else if (local.length > 0 && remote.length < local.length) {
+            // We have scenes the broker doesn't — push our copy so broker is up to date
             setTimeout(() => publishRetained(topicScenes, {
               scenes: local,
               boardIdA: cfg.boardIdA, boardNameA: cfg.boardNameA,
               boardIdB: cfg.boardIdB, boardNameB: cfg.boardNameB,
             }), 200);
-          } else if (remote.length > 0) {
-            // Remote wins for scenes with the same name; keep local-only scenes
-            const remoteNames = new Set(remote.map(s => s.name));
-            const merged = [...remote, ...local.filter(s => !remoteNames.has(s.name))];
-            localStorage.setItem("ll_scenes", JSON.stringify(merged));
-            // If we added local-only scenes, push merged copy back so all devices have them
-            if (merged.length > remote.length) {
-              setTimeout(() => publishRetained(topicScenes, {
-                scenes: merged,
-                boardIdA: cfg.boardIdA, boardNameA: cfg.boardNameA,
-                boardIdB: cfg.boardIdB, boardNameB: cfg.boardNameB,
-              }), 200);
-            }
           }
           renderScenes();
         }
