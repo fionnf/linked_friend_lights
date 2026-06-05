@@ -1076,9 +1076,13 @@ function connect() {
       }
 
       if (d.from) {
-        boardLastSeen[d.from] = Date.now();
+        const _now = Date.now();
+        const _wasOffline = !boardLastSeen[d.from] || (_now - boardLastSeen[d.from]) > BOARD_TIMEOUT_MS;
+        boardLastSeen[d.from] = _now;
         boardLastChange[d.from] = boardStateDesc(d);
         updatePills();
+        // Board just came (back) online — push current web-app state to it
+        if (_wasOffline) setTimeout(publishState, 1500);
       }
       if (d.anim_library) { boardLib = d.anim_library; renderBoardLib(); }
       if (d.from === BOARD_ID) return;
@@ -1215,7 +1219,7 @@ document.querySelectorAll(".anim-tile").forEach(btn => {
       document.getElementById("custom-anim-panel").classList.add("open");
       document.getElementById("custom-anim-toggle").textContent = "− Custom Animation";
     }
-    const payload = { anim_mode: animMode || null, anim_speed: animSpeed };
+    const payload = { anim_mode: animMode || null, anim_speed: animSpeed, on: powered };
     if (animMode === "custom") payload.anim_params = getCustomParams();
     publish(payload);
   });

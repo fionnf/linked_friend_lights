@@ -111,3 +111,9 @@ WEBREPL_PASSWORD = "linked1"   # 4–9 characters
 
 # ── Reconnect behaviour ─────────────────────────────────────
 RECONNECT_DELAY_MS = 5000      # ms to wait before retrying WiFi / MQTT
+
+# ── Timezone ─────────────────────────────────────────────────
+# NTP sets the board to UTC. Alarm times are entered in local time.
+# Set this to your UTC offset in whole hours.
+# Zürich: 1 in winter (CET), 2 in summer (CEST).
+TIMEZONE_OFFSET_H = 1

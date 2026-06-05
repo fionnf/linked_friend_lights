@@ -18,6 +18,7 @@ from config import (
     TOUCH_PINS,
     RECONNECT_DELAY_MS,
     WEBREPL_PASSWORD,
+    TIMEZONE_OFFSET_H,
 )
 
 FRAME_MS         = 16       # ~60 fps tick rate
@@ -132,11 +133,13 @@ def on_message(topic, msg):
     anim_speed     = data.get("anim_speed")
     anim_params    = data.get("anim_params")
 
+    _state_dirty = False
     if on is not None:
         engine.set_power(bool(on))
-        save_state()  # persist so board restores correct state after unexpected reboot
+        _state_dirty = True
     if brightness is not None:
         engine.set_brightness(float(brightness))
+        _state_dirty = True
     if reverse is not None:
         engine.set_reverse(bool(reverse))
     if fade_steps is not None:
@@ -147,6 +150,9 @@ def on_message(topic, msg):
         engine.set_drift_interval(int(drift_interval))
     if anim_mode != "__unset__":
         engine.set_animation(anim_mode, anim_speed if anim_speed is not None else 1.0, anim_params)
+        _state_dirty = True
+    if _state_dirty:
+        save_state()
     if groups is not None and on is not False and (not engine._anim_mode or not data.get("sync")):
         fade_override = SYNC_FADE_STEPS if data.get("sync") else None
         engine.force_colour(groups, fade_steps_override=fade_override)
@@ -303,7 +309,13 @@ def apply_animation(entry):
 def save_state():
     try:
         with open(STATE_FILE, "w") as f:
-            ujson.dump({"on": engine._powered_on}, f)
+            ujson.dump({
+                "on":         engine._powered_on,
+                "brightness": engine._brightness,
+                "anim_mode":  engine._anim_mode,
+                "anim_speed": engine._anim_speed,
+                "anim_params": engine._anim_params,
+            }, f)
     except Exception as e:
         print(f"[state] save failed: {e}")
 
@@ -317,8 +329,18 @@ def restore_state():
             print("[state] restored: off")
         else:
             print("[state] restored: on")
+        if "brightness" in d:
+            engine.set_brightness(float(d["brightness"]))
+        anim = d.get("anim_mode")
+        if anim:
+            engine.set_animation(
+                anim,
+                float(d.get("anim_speed", 1.0)),
+                d.get("anim_params") or {},
+            )
+            print(f"[state] restored: anim_mode={anim}")
     except Exception:
-        pass  # no saved state — use default (on)
+        pass  # no saved state — use defaults
 
 def sync_ntp():
     try:
@@ -514,15 +536,20 @@ def main():
             cur_min = t[4]
             if cur_min != _alarm_checked_min:
                 _alarm_checked_min = cur_min
-                # Reset fired set at midnight
-                if t[3] == 0 and cur_min == 0:
+                # Convert UTC time from NTP to local time using timezone offset
+                utc_h = t[3]
+                local_h = (utc_h + TIMEZONE_OFFSET_H) % 24
+                day_adj = (utc_h + TIMEZONE_OFFSET_H) // 24
+                local_day = (t[6] + day_adj) % 7
+                # Reset fired set at local midnight
+                if local_h == 0 and cur_min == 0:
                     _alarm_fired.clear()
                 for alarm in _alarms:
                     key = (alarm.get("hour", 0), alarm.get("minute", 0))
                     boards = alarm.get("boards", [])
                     if (alarm.get("enabled", True)
-                            and t[3] == key[0] and cur_min == key[1]
-                            and t[6] in alarm.get("days", list(range(7)))
+                            and local_h == key[0] and cur_min == key[1]
+                            and local_day in alarm.get("days", list(range(7)))
                             and key not in _alarm_fired
                             and (not boards or BOARD_ID in boards)):
                         _alarm_fired.add(key)
