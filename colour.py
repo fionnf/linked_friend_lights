@@ -38,7 +38,7 @@ def _lerp_colour(c1, c2, t):
     return tuple(int(_lerp(a, b, t)) for a, b in zip(c1, c2))
 
 def _rand_float(lo, hi):
-    return lo + (urandom.getrandbits(16) / 65535.0) * (hi - lo)
+    return lo + (urandom.getrandbits(16) / 65536.0) * (hi - lo)
 
 def _random_partition(total, n, mn, mx):
     mn = max(1, mn)
