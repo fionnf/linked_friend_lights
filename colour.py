@@ -191,11 +191,12 @@ class ColourEngine:
         self._drift_interval = max(5, int(seconds))
 
     def set_animation(self, mode, speed=1.0, params=None):
-        self._anim_mode   = mode if mode else None
+        new_mode = mode if mode else None
+        if new_mode != self._anim_mode:
+            self._anim_phase = 0.0
+        self._anim_mode   = new_mode
         self._anim_speed  = max(0.1, float(speed if speed is not None else 1.0))
         self._anim_params = params or {}
-        if mode:
-            self._anim_phase = 0.0
 
     def check_drift(self):
         if self._drift_enabled and utime.time() - self._last_drift > self._drift_interval:

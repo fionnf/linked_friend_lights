@@ -148,9 +148,9 @@ def on_message(topic, msg):
         engine.set_drift_interval(int(drift_interval))
     if anim_mode != "__unset__":
         engine.set_animation(anim_mode, anim_speed if anim_speed is not None else 1.0, anim_params)
-    if groups is not None and on is not False and (not engine._anim_mode or not data.get("sync")):
-        fade_override = SYNC_FADE_STEPS if data.get("sync") else None
-        engine.force_colour(groups, fade_steps_override=fade_override)
+        save_state()
+    if groups is not None and on is not False and not data.get("sync"):
+        engine.force_colour(groups)
 
     add_net = data.get("add_network")
     if add_net:
@@ -304,13 +304,18 @@ def apply_animation(entry):
         engine.set_brightness(float(brightness))
     if fade_steps is not None:
         engine.set_fade_steps(int(fade_steps))
-    if groups and on is not False and not anim_mode:
+    if groups and on is not False:
         engine.force_colour(groups)
 
 def save_state():
     try:
         with open(STATE_FILE, "w") as f:
-            ujson.dump({"on": engine._powered_on}, f)
+            ujson.dump({
+                "on":         engine._powered_on,
+                "anim_mode":  engine._anim_mode,
+                "anim_speed": engine._anim_speed,
+                "anim_params": engine._anim_params,
+            }, f)
     except Exception as e:
         print(f"[state] save failed: {e}")
 
@@ -324,6 +329,10 @@ def restore_state():
             print("[state] restored: off")
         else:
             print("[state] restored: on")
+        anim = d.get("anim_mode")
+        if anim:
+            engine.set_animation(anim, d.get("anim_speed", 1.0), d.get("anim_params"))
+            print(f"[state] restored animation: {anim}")
     except Exception:
         pass  # no saved state — use default (on)
 
@@ -447,6 +456,7 @@ def main():
     _ping_at        = utime.ticks_add(utime.ticks_ms(), 20_000)
     _sync_at        = utime.ticks_add(utime.ticks_ms(), SYNC_INTERVAL_MS)
     _heartbeat_at   = utime.ticks_add(utime.ticks_ms(), 5_000)  # first beat soon after boot
+    _ntp_retry_at   = utime.ticks_add(utime.ticks_ms(), 60_000) if not ntp_ok else None
     _backoff_ms     = RECONNECT_DELAY_MS
     _anim_announce  = True   # publish library once after first connect
 
@@ -505,6 +515,11 @@ def main():
             publish_event({"heartbeat": True, "fw": FIRMWARE_VERSION,
                            "anim": engine._anim_mode})
             _heartbeat_at = utime.ticks_add(now, 30_000)
+
+        # ── Retry NTP if it failed on boot ──
+        if not ntp_ok and wifi_ok and _ntp_retry_at is not None and utime.ticks_diff(now, _ntp_retry_at) >= 0:
+            ntp_ok = sync_ntp()
+            _ntp_retry_at = None if ntp_ok else utime.ticks_add(now, 300_000)  # retry every 5 min
 
         # ── Daily OTA reboot at OTA_HOUR_UTC — save state first ──
         if ntp_ok:
