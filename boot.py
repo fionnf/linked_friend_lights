@@ -52,7 +52,7 @@ def _connect():
         while not wlan.isconnected():
             if utime.ticks_diff(deadline, utime.ticks_ms()) <= 0:
                 wlan.disconnect()
-                utime.sleep_ms(300)
+                utime.sleep_ms(1000)
                 break
             utime.sleep_ms(200)
         if wlan.isconnected():

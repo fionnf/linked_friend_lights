@@ -240,6 +240,9 @@ def publish_event(payload: dict):
 
 
 OTA_HOUR_UTC = 17   # 5 pm UTC — daily reboot triggers boot.py OTA
+# Stagger by board so both boards never hit the router simultaneously:
+# board_a reboots at 17:00, board_b (and any other) at 17:02.
+OTA_MINUTE_UTC = 0 if BOSS else 2
 
 STATE_FILE  = "state.json"
 ALARM_FILE  = "alarms.json"
@@ -470,7 +473,7 @@ def main():
                 wlan = network.WLAN(network.STA_IF)
                 if not wlan.isconnected():
                     print("[wifi] lost — reconnecting before MQTT retry")
-                    connect_wifi(tick=None)
+                    connect_wifi(tick=lambda: engine.tick(strip))
                 client = connect_mqtt()
                 _backoff_ms    = RECONNECT_DELAY_MS   # reset on success
                 _ping_at       = utime.ticks_add(now, 20_000)
@@ -527,8 +530,8 @@ def main():
             cur_min = t[4]  # minute within hour
             if t[3] == OTA_HOUR_UTC and cur_min != _ota_check_min:
                 _ota_check_min = cur_min
-                if cur_min == 0:
-                    print("[ota] 5 pm UTC — saving state and rebooting for OTA")
+                if cur_min == OTA_MINUTE_UTC:
+                    print(f"[ota] OTA reboot ({OTA_HOUR_UTC:02d}:{OTA_MINUTE_UTC:02d} UTC) — saving state")
                     save_state()
                     import machine
                     machine.reset()
