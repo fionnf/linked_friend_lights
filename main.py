@@ -360,7 +360,7 @@ def main():
     _ota_check_min  = -1
     _alarm_checked_min = -1
     _sunrise = {"active": False, "start_ms": 0, "dur_ms": 0, "target_br": 1.0}
-    _alarm_fired = set()  # (hour, minute) pairs fired this calendar day
+    _alarm_fired = set()  # (alarm_index, hour, minute) tuples fired this calendar day
     last_frame      = utime.ticks_ms()
     _reconnect_at   = utime.ticks_add(utime.ticks_ms(), RECONNECT_DELAY_MS)
     _ping_at        = utime.ticks_add(utime.ticks_ms(), 20_000)
@@ -451,11 +451,13 @@ def main():
                 # Reset fired set at midnight
                 if t[3] == 0 and cur_min == 0:
                     _alarm_fired.clear()
-                for alarm in _alarms:
-                    key = (alarm.get("hour", 0), alarm.get("minute", 0))
+                for alarm_idx, alarm in enumerate(_alarms):
+                    alarm_hour = alarm.get("hour", 0)
+                    alarm_min = alarm.get("minute", 0)
+                    key = (alarm_idx, alarm_hour, alarm_min)
                     boards = alarm.get("boards", [])
                     if (alarm.get("enabled", True)
-                            and t[3] == key[0] and cur_min == key[1]
+                            and t[3] == alarm_hour and cur_min == alarm_min
                             and t[6] in alarm.get("days", list(range(7)))
                             and key not in _alarm_fired
                             and (not boards or BOARD_ID in boards)):
@@ -469,7 +471,7 @@ def main():
                             _sunrise["target_br"] = 0.0   # ramp down to off
                             _sunrise["sunset"]    = True
                             _sunrise["start_br"]  = engine._brightness
-                            print(f"[alarm] sunset! {key[0]:02d}:{key[1]:02d}")
+                            print(f"[alarm] sunset! {alarm_hour:02d}:{alarm_min:02d}")
                         else:
                             _sunrise["active"]    = True
                             _sunrise["start_ms"]  = now
@@ -478,9 +480,8 @@ def main():
                             _sunrise["sunset"]    = False
                             engine.set_power(True)
                             engine.set_brightness(0.0)
-                            print(f"[alarm] sunrise! {key[0]:02d}:{key[1]:02d}")
+                            print(f"[alarm] sunrise! {alarm_hour:02d}:{alarm_min:02d}")
                         publish_event(engine.get_event_payload())
-                        break
 
         # ── Sunrise / sunset ramp ──
         if _sunrise["active"]:
