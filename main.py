@@ -24,7 +24,7 @@ from config import (
     WEBREPL_PASSWORD,
 )
 
-FIRMWARE_VERSION       = "2026-07-27.2"
+FIRMWARE_VERSION       = "2026-08-25.1"
 FRAME_MS               = 16
 SYNC_INTERVAL_MS       = 60_000
 SYNC_FADE_STEPS        = 300
@@ -379,6 +379,14 @@ def _handle_message(data):
 
     if data.get("reboot"):
         print("[mqtt] reboot requested — saving state and rebooting")
+        # Ack before resetting, so the web UI can tell "rebooting now" apart
+        # from "message ignored by firmware too old to know reboot". Without
+        # this the button gives no sign of life until the board drops offline,
+        # which looks identical to the button being broken.
+        try:
+            publish_event({"rebooting": True, "fw": FIRMWARE_VERSION})
+        except Exception:
+            pass
         save_state()
         machine.reset()
 

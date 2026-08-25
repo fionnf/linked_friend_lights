@@ -639,6 +639,7 @@ const boardNtp        = {};   // clock synced? alarms cannot fire without it
 const boardLastChange = {};
 const boardLastFw     = {};   // firmware version per board
 const boardLastPower  = {};   // last known on/off state per board
+let _rebootWatchTimer = null; // pending "did any board answer the reboot?" check
 const PING_INTERVAL_MS  = 120_000; // active presence poll every 2 min
 const BOARD_TIMEOUT_MS  = 150_000; // 2.5× ping interval before marking offline
 let alarms      = [];
@@ -818,6 +819,10 @@ function connect() {
         if (d.on !== undefined) boardLastPower[d.from] = d.on;
         updatePills();
         _scheduleBoardTimeout(d.from);
+      }
+      if (d.rebooting && d.from && d.from.startsWith("board_")) {
+        showToast("\u21ba " + d.from + " is rebooting \u2014 back in ~30 s");
+        if (_rebootWatchTimer) { clearTimeout(_rebootWatchTimer); _rebootWatchTimer = null; }
       }
       if (d.from === BOARD_ID) return;
       if (Date.now() < _holdUntil) return;  // user is mid-interaction — don't yank controls
@@ -1212,15 +1217,42 @@ document.getElementById("btn-reconnect").addEventListener("click", () => {
     console.error("[init] btn-reboot not found in DOM");
     return;
   }
+  // No confirm()/alert() here: iOS suppresses native dialogs in
+  // standalone (home-screen) web apps often enough that the old
+  // confirm-gated version simply did nothing when tapped from the
+  // installed app. Arming the button with a second tap needs no dialog,
+  // and every outcome — sent, not connected, no reply — lands as a
+  // toast instead of a native popup that may never appear.
+  const idleLabel = btn.textContent;
+  let armTimer = null;
+  const disarm = () => {
+    if (armTimer) { clearTimeout(armTimer); armTimer = null; }
+    btn.textContent = idleLabel;
+  };
   btn.addEventListener("click", () => {
-    if (!confirm("Reboot both boards? They will go offline for ~30 seconds while they update.")) return;
-    // Always reboot both boards regardless of current target selection
     if (!client || !client.connected) {
-      alert("Not connected to MQTT broker");
+      showToast("⚠ Not connected — the lamps can't hear a reboot");
+      disarm();
       return;
     }
+    if (!armTimer) {
+      btn.textContent = "Tap again to reboot both boards";
+      armTimer = setTimeout(disarm, 4000);
+      return;
+    }
+    disarm();
+    // Always reboot both boards regardless of current target selection
     client.publish(topic(), JSON.stringify({ reboot: true, from: BOARD_ID }));
     _flashDot();
+    showToast("↺ Reboot sent — lamps go offline for ~30 s");
+    // New firmware answers with a `rebooting` ack before it resets. If no
+    // board says anything, the likeliest cause is firmware old enough to
+    // not know `reboot` at all — which OTA can't fix, only boot.py can.
+    if (_rebootWatchTimer) clearTimeout(_rebootWatchTimer);
+    _rebootWatchTimer = setTimeout(() => {
+      _rebootWatchTimer = null;
+      showToast("⚠ No board replied — firmware may be too old to reboot over MQTT (is boot.py installed?)");
+    }, 8000);
   });
 })();
 
