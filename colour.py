@@ -136,7 +136,13 @@ class ColourEngine:
         self._brightness    = LED_BRIGHTNESS
         self._reverse       = REVERSE_LEDS
         self._fade_steps    = FADE_STEPS      # runtime-adjustable
-        self._drift_enabled  = True
+        # Off by default. Drift used to boot enabled, and since nothing
+        # persists across reboots — and boards reboot themselves after 10 min
+        # of lost MQTT — the lamps kept re-enabling it on their own no matter
+        # what the web UI sent. Anyone who wants drifting can still switch it
+        # on explicitly via drift_enabled over MQTT; it just has to be asked
+        # for now, instead of being what the lamps do when nobody's looking.
+        self._drift_enabled  = False
 
         self._drift_interval = IDLE_DRIFT_INTERVAL_S
         self._last_drift     = utime.time()
