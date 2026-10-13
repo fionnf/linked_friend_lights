@@ -24,11 +24,14 @@ from config import (
     WEBREPL_PASSWORD,
 )
 
-FIRMWARE_VERSION       = "2026-08-25.1"
+FIRMWARE_VERSION       = "2026-10-13.1"
 FRAME_MS               = 16
 SYNC_INTERVAL_MS       = 60_000
 SYNC_FADE_STEPS        = 300
 WIFI_OFFLINE_REBOOT_MS = 10 * 60 * 1000   # reboot after 10 min offline
+# A colour change is written to flash this long after the last one, so a
+# tap or a drag of the palette costs one write, not one per message.
+COLOUR_SAVE_DELAY_MS   = 30_000
 
 # Boards keep their own (never-OTA'd) config.py, so new config flags must
 # be imported with a fallback or older boards would ImportError on boot.
@@ -73,6 +76,17 @@ _test_alarm = None    # set by MQTT test_alarm, consumed by the main loop
 # broadcast command — which sets both to the same thing — re-links them.
 INDEPENDENT_MS   = 30 * 60 * 1000
 _independent_until = None   # ticks_ms deadline, or None when linked
+
+# The colour used to live only in RAM. Every reboot — the nightly OTA
+# restart, the 10-minute offline watchdog, a crash, a hang — brought a lamp
+# back in warm white, and the BOSS then spread that white to the follower
+# within a minute, undoing whatever the follower showed. Now the colour is
+# persisted (see save_state), a board that (re)connects asks its partner
+# for the current state, and the BOSS only syncs a colour it was actually
+# given since boot.
+_colour_known   = False     # a colour has been restored or set since boot
+_colour_save_at = None      # ticks_ms deadline for the debounced colour write
+_sync_at        = None      # next BOSS sync, ticks_ms
 
 # ── Module-level objects ─────────────────────────────────────
 strip  = SK6812(pin=LED_PIN, num_leds=NUM_LEDS, brightness=LED_BRIGHTNESS)
@@ -324,6 +338,16 @@ def _handle_message(data):
     if data.get("echo"):
         return
 
+    # A partner that just (re)connected wants to look like us. Answer only
+    # while linked: lamps set apart on purpose keep their own colours.
+    if data.get("state_request") and sender.startswith("board_"):
+        if _independent_until is None:
+            payload = engine.get_event_payload()
+            payload["sync"] = True
+            publish_event(payload)
+            print("[sync] answered state request from", sender)
+        return
+
     print(f"[mqtt] recv: {data}")
     groups         = _sanitise_groups(data.get("groups"))
     on             = data.get("on")
@@ -355,6 +379,7 @@ def _handle_message(data):
     if groups is not None and on is not False:
         fade_override = SYNC_FADE_STEPS if data.get("sync") else None
         engine.force_colour(groups, fade_steps_override=fade_override)
+        note_colour_change()
 
     add_net = data.get("add_network")
     if (isinstance(add_net, dict)
@@ -464,24 +489,54 @@ def save_alarms(data):
 
 _saved_state = None
 
+def _state_snapshot():
+    groups = tuple((g["pos"], g["w"], g["size"]) for g in engine.get_event_payload()["groups"])
+    return (engine._powered_on, round(engine._brightness, 3), groups)
+
+def note_colour_change():
+    """A colour was set (command, tap, drift, partner): remember that the
+    lamp now shows something deliberate, and schedule one flash write."""
+    global _colour_known, _colour_save_at
+    _colour_known = True
+    _colour_save_at = utime.ticks_add(utime.ticks_ms(), COLOUR_SAVE_DELAY_MS)
+
+def flush_colour(now):
+    """The debounced colour write, called from the main loop."""
+    global _colour_save_at
+    if _colour_save_at is not None and utime.ticks_diff(now, _colour_save_at) >= 0:
+        _colour_save_at = None
+        save_state()
+
 def save_state():
-    """Persist power + brightness. Skips the write when nothing changed, so
-    callers can invoke it freely without wearing out the flash."""
+    """Persist power, brightness and the colour (the groups). Skips the
+    write when nothing changed, so callers can invoke it freely without
+    wearing out the flash."""
     global _saved_state
-    snap = (engine._powered_on, round(engine._brightness, 3))
+    snap = _state_snapshot()
     if snap == _saved_state:
         return
     try:
-        _write_json(STATE_FILE, {"on": snap[0], "brightness": snap[1]})
+        _write_json(STATE_FILE, {
+            "on": snap[0], "brightness": snap[1],
+            "groups": [{"pos": p, "w": w, "size": n} for p, w, n in snap[2]],
+        })
         _saved_state = snap
     except Exception as e:
         print(f"[state] save failed: {e}")
 
 def restore_state():
-    global _saved_state
+    global _saved_state, _colour_known
     try:
         with open(STATE_FILE) as f:
             d = ujson.load(f)
+        # Colour first, while the engine is still powered: force_colour is
+        # a no-op on a lamp that is off. Instant, so the lamp comes up in
+        # its colour rather than fading there from warm white.
+        groups = _sanitise_groups(d.get("groups"))
+        if groups:
+            engine.force_colour(groups, fade_steps_override=1)
+            _colour_known = True
+            print(f"[state] restored colour: {len(groups)} group(s)")
         br = d.get("brightness")
         if br is not None:
             engine.set_brightness(float(br))
@@ -492,9 +547,35 @@ def restore_state():
         else:
             print(f"[state] restored: on, brightness {br}")
         # Seed the snapshot so an unchanged state never rewrites flash
-        _saved_state = (engine._powered_on, round(engine._brightness, 3))
+        _saved_state = _state_snapshot()
     except Exception:
         pass  # no saved state — use default (on)
+
+def request_partner_state():
+    """Ask the other lamp how it looks right now. Sent on every (re)connect:
+    whatever changed while we were away, the partner knows."""
+    publish_event({"state_request": True})
+
+def boss_sync(now):
+    """The BOSS re-publishes its state every SYNC_INTERVAL_MS so the lamps
+    converge. Not while they are set apart on purpose, and never a colour
+    this boot has not been given — a fresh boot knows only warm white, and
+    pushing that onto the follower is exactly what used to blank it."""
+    global _sync_at
+    if not BOSS or client is None or _sync_at is None:
+        return False
+    if utime.ticks_diff(now, _sync_at) < 0:
+        return False
+    _sync_at = utime.ticks_add(now, SYNC_INTERVAL_MS)
+    if _independent_until is not None and utime.ticks_diff(_independent_until, now) > 0:
+        return False   # lamps deliberately set apart — don't overwrite
+    if not _colour_known:
+        return False
+    payload = engine.get_event_payload()
+    payload["sync"] = True
+    publish_event(payload)
+    print("[sync] boss published state")
+    return True
 
 def sync_ntp():
     try:
@@ -550,7 +631,7 @@ class SetupPulser:
 # ── Main loop ────────────────────────────────────────────────
 
 def main():
-    global client, wdt, ntp_ok, _test_alarm
+    global client, wdt, ntp_ok, _test_alarm, _sync_at
 
     print(f"[boot] firmware {FIRMWARE_VERSION} — board {BOARD_ID}")
 
@@ -602,8 +683,12 @@ def main():
     touch.calibrate_all()
     print("[touch] ready")
 
-    # Restore power state saved before the last OTA reboot
+    # Restore power, brightness and colour saved before the last reboot
     restore_state()
+
+    # Then ask the partner: it was awake while we were not
+    if client is not None:
+        request_partner_state()
 
     # Load saved alarms
     load_alarms()
@@ -619,7 +704,7 @@ def main():
     last_frame      = utime.ticks_ms()
     _reconnect_at   = utime.ticks_add(utime.ticks_ms(), RECONNECT_DELAY_MS)
     _ping_at        = utime.ticks_add(utime.ticks_ms(), 20_000)
-    _sync_at        = utime.ticks_add(utime.ticks_ms(), SYNC_INTERVAL_MS)
+    _sync_at        = utime.ticks_add(utime.ticks_ms(), SYNC_INTERVAL_MS)   # module global
     _heartbeat_at   = utime.ticks_add(utime.ticks_ms(), 5_000)  # first beat soon after boot
     _status_at      = utime.ticks_add(utime.ticks_ms(), 300_000)
     _ntp_retry_at   = utime.ticks_add(utime.ticks_ms(), 60_000)
@@ -650,6 +735,9 @@ def main():
                 client = connect_mqtt()
                 _backoff_ms    = RECONNECT_DELAY_MS   # reset on success
                 _ping_at       = utime.ticks_add(now, 20_000)
+                # Catch up before the next sync, not the other way round
+                _sync_at       = utime.ticks_add(now, SYNC_INTERVAL_MS)
+                request_partner_state()
             except Exception as e:
                 print(f"[mqtt] reconnect failed: {e}")
                 _backoff_ms = min(_backoff_ms * 2, 60_000)  # cap at 60 s
@@ -684,15 +772,10 @@ def main():
             _offline_since = None
 
         # ── Boss sync — publish current state every 60 s for follower to drift to ──
-        if BOSS and client is not None and utime.ticks_diff(now, _sync_at) >= 0:
-            if _independent_until is not None and utime.ticks_diff(_independent_until, now) > 0:
-                pass   # lamps deliberately set apart — don't overwrite
-            else:
-                payload = engine.get_event_payload()
-                payload["sync"] = True
-                publish_event(payload)
-                print("[sync] boss published state")
-            _sync_at = utime.ticks_add(now, SYNC_INTERVAL_MS)
+        boss_sync(now)
+
+        # ── Colour write, debounced after the last change ──
+        flush_colour(now)
 
         # ── Heartbeat — announce presence every 30 s ──
         if client is not None and utime.ticks_diff(now, _heartbeat_at) >= 0:
@@ -857,6 +940,7 @@ def main():
             engine.set_fade_steps(SYNC_FADE_STEPS)  # use slow fade for drift
             engine.drift()
             engine.set_fade_steps(prev_steps)        # restore normal speed after
+            note_colour_change()
             publish_event(engine.get_event_payload())
 
         # ── Poll touch sensors ──
@@ -865,11 +949,13 @@ def main():
         if event == "tap":
             print("[touch] tap")
             engine.impulse()
+            note_colour_change()
             publish_event(engine.get_event_payload())
 
         elif event == "hold":
             print("[touch] hold → toggle power")
             engine.toggle_power()
+            save_state()
             publish_event(engine.get_event_payload())
 
         # ── Render frame at target FPS ──

@@ -87,6 +87,8 @@ def run():
     check("published retained presence", any("status/board_a" in t for t in topics))
     hb = [json.loads(_s(m)) for t, m, r in us.published if "heartbeat" in _s(m)]
     check("published a heartbeat", len(hb) > 0)
+    check("boot asks the partner for its state",
+          any("state_request" in _s(m) for t, m, r in us.published))
     if hb:
         check("heartbeat reports ntp + alarms", "ntp" in hb[0] and "alarms" in hb[0], str(hb[0]))
 
@@ -194,6 +196,76 @@ def run():
     fw.client.check_msg()
     check("test_alarm queued for the main loop", fw._test_alarm is not None,
           str(fw._test_alarm))
+
+    print("\n=== 9. colour survives a reboot ===")
+    # Every reboot (nightly OTA, offline watchdog, crash, hang) used to bring
+    # a lamp back in warm white, and the BOSS spread that white to the
+    # follower within a minute.
+    fw.client.inject(b"test_prefix/events", json.dumps({
+        "from": "web_app", "on": True,
+        "groups": [{"pos": 0.5, "w": 0.5, "size": 4},
+                   {"pos": 0.9, "w": 0.1, "size": 6}]}).encode())
+    fw.client.check_msg()
+    check("a colour command schedules a write rather than making one", fw._colour_save_at is not None)
+    before = _os.stat(st).st_mtime_ns if _os.path.exists(st) else -1
+    fw.flush_colour(utime.ticks_ms())
+    check("the write waits for the debounce", (_os.stat(st).st_mtime_ns if _os.path.exists(st) else -1) == before)
+    utime.advance(fw.COLOUR_SAVE_DELAY_MS + 1)
+    fw.flush_colour(utime.ticks_ms())
+    saved = json.load(open(st))
+    check("the colour lands in state.json after the debounce",
+          [round(g["pos"], 4) for g in saved.get("groups", [])] == [0.5, 0.9], str(saved))
+    check("no second write while nothing changed", fw._colour_save_at is None)
+
+    # Reboot: a fresh engine knows only warm white, then restore_state runs
+    fw.engine.force_colour([{"pos": 0.0, "w": 1.0, "size": 10}], 1)
+    fw._colour_known = False
+    fw._saved_state = None
+    fw.restore_state()
+    check("restore puts the colour back", [round(p, 4) for p in fw.engine._target_pos] == [0.5, 0.9],
+          str(fw.engine._target_pos))
+    check("restore keeps the group layout", fw.engine._group_sizes == [4, 6], str(fw.engine._group_sizes))
+    check("a restored colour counts as known", fw._colour_known)
+
+    print("\n=== 10. the BOSS never syncs a colour it was not given ===")
+    now = utime.ticks_ms()
+    fw._independent_until = None
+    fw._colour_known = False
+    fw._sync_at = now - 1
+    us.published.clear()
+    fw.boss_sync(now)
+    check("fresh boot: no sync", not any("sync" in _s(m) for t, m, r in us.published))
+    fw._colour_known = True
+    fw._sync_at = now - 1
+    fw.boss_sync(now)
+    synced = [json.loads(_s(m)) for t, m, r in us.published if '"sync"' in _s(m)]
+    check("known colour: sync goes out", len(synced) == 1 and synced[0].get("sync") is True
+          and [round(g["pos"], 4) for g in synced[0]["groups"]] == [0.5, 0.9], str(synced))
+
+    print("\n=== 11. a partner that reconnects is answered ===")
+    us.published.clear()
+    fw._independent_until = None
+    fw.client.inject(b"test_prefix/events", json.dumps({"from": "board_b", "state_request": True}).encode())
+    fw.client.check_msg()
+    answers = [json.loads(_s(m)) for t, m, r in us.published if "state_request" not in _s(m)]
+    check("linked: the request is answered with sync", len(answers) == 1 and answers[0].get("sync") is True
+          and "groups" in answers[0], str(answers))
+    us.published.clear()
+    fw._independent_until = utime.ticks_add(utime.ticks_ms(), 60_000)
+    fw.client.inject(b"test_prefix/events", json.dumps({"from": "board_b", "state_request": True}).encode())
+    fw.client.check_msg()
+    check("set apart: the request is left alone", len(us.published) == 0, str(us.published))
+    fw._independent_until = None
+
+    print("\n=== 12. the partner's answer is adopted with the slow fade ===")
+    fw.client.inject(b"test_prefix/events", json.dumps({
+        "from": "board_b", "sync": True, "on": True,
+        "groups": [{"pos": 0.25, "w": 0.5, "size": 10}]}).encode())
+    fw.client.check_msg()
+    check("partner state applied", abs(fw.engine._target_pos[0] - 0.25) < 1e-6, str(fw.engine._target_pos))
+    check("with the 300-step sync fade", fw.engine._fade_steps_per[0] == fw.SYNC_FADE_STEPS,
+          str(fw.engine._fade_steps_per))
+    check("and scheduled for flash", fw._colour_save_at is not None)
 
     shutil.rmtree(work, ignore_errors=True)
     print()

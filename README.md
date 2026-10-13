@@ -131,7 +131,9 @@ The `ColourEngine` class manages per-group colour state:
 
 When the BOSS's physical touch sensor fires, it runs `ColourEngine.impulse()` (random colour change), then publishes its new state with `"sync": true`. The follower applies the same groups with a fast fade (`SYNC_FADE_STEPS`) so both strips match immediately.
 
-Every 60 s the BOSS publishes its state with `"sync": true` as a drift-correction heartbeat. The follower applies it with a slow 300-step fade so re-alignment is invisible.
+Every 60 s the BOSS publishes its state with `"sync": true` as a drift-correction heartbeat. The follower applies it with a slow 300-step fade so re-alignment is invisible. The BOSS only ever syncs a colour it has actually been given since boot (restored from flash, set by a client, a tap, or the partner): a board fresh from a reboot knows nothing but warm white, and before this guard it pushed that white onto the follower within a minute, undoing whatever the follower showed.
+
+**Catching up.** A board that (re)connects publishes `{"state_request": true}`. The partner, if the lamps are linked, answers with its full state and `"sync": true`, and the newcomer adopts it with the slow fade. Whatever changed while a board was offline or rebooting, the partner knows. Lamps set apart on purpose (independent mode, below) do not answer, so they keep their own colours.
 
 **Independent mode.** That periodic sync would otherwise undo deliberate per-lamp settings — set one lamp with **Send to → LS** and it reverted within a minute. So a **targeted** command (one carrying `target`) unlinks the lamps and suppresses the BOSS sync for 30 minutes; a **broadcast** colour command — which sets both lamps to the same thing — re-links them immediately. Boards notice targeted traffic even when it is addressed to the other lamp, so the BOSS knows to stand down.
 
@@ -156,9 +158,9 @@ If the board loses its MQTT connection (WiFi down or broker unreachable) for mor
 
 ### State Persistence
 
-On/off state and brightness are written to `state.json` and restored on boot before connecting to MQTT — so the lamps come back exactly as they were after the nightly OTA reboot.
+On/off state, brightness **and the colour** (the groups: `pos`, `w`, `size`) are written to `state.json` and restored on boot — so the lamps come back exactly as they were after the nightly OTA reboot, the 10-minute offline watchdog, a crash or a hang. The colour is applied instantly, before the power state, so a lamp comes up in its colour rather than fading there from warm white. Until this, only power and brightness survived: every reboot was a warm-white reset, and with reboots as common as they are (one a day by design, more on a flaky connection) the lamps "kept going back to white".
 
-Writes are deliberately rationed. The web app includes `on` in every state publish, so persisting on each message meant a flash erase/write on every slider tick (~8 per second while dragging) — needless wear, and each write stalls the render loop. State is now written only when it actually changes: immediately on a power toggle, before any planned reboot, and on a 5-minute flush that bounds what an unexpected power cut can lose.
+Writes are deliberately rationed. The web app includes `on` in every state publish, so persisting on each message meant a flash erase/write on every slider tick (~8 per second while dragging) — needless wear, and each write stalls the render loop. State is written only when it actually changes: immediately on a power toggle, before any planned reboot, on a 5-minute flush that bounds what an unexpected power cut can lose, and — for colour — once, 30 s after the last change (`COLOUR_SAVE_DELAY_MS`), so a tap or a drag along the palette costs a single write.
 
 ### Daily OTA reboot
 
@@ -280,6 +282,7 @@ Every message on `P/events` is a JSON **object**. Non-objects are dropped.
 | `target` | string | Optional. If present, only the board with this `board_id` acts on the message |
 | `echo` | bool | Optional. Marks an informational state report. **Boards ignore echo-flagged messages** — see below |
 | `sync` | bool | Optional. Board-to-board: apply colours with a slow 300-step fade |
+| `state_request` | bool | Optional. Board-to-board: "I just (re)connected, how do you look?" A linked partner answers with its state and `sync: true` |
 
 > **The `echo` rule matters.** When a board answers a client, it replies with
 > its full state plus `"echo": true`. Without that flag the *other* board
@@ -590,7 +593,10 @@ Runs `main()` against stubbed MicroPython modules (`tests/stubs/`) and checks
 that the board boots, arms and feeds the watchdog, subscribes to the events
 **and** retained alarms topics, registers its Last-Will, publishes presence and
 heartbeats, reboots on command, installs a retained alarm schedule, applies
-colour commands, and survives malformed input.
+colour commands, survives malformed input, persists the colour (debounced) and
+restores it after a reboot, never syncs an unknown colour, answers a partner's
+`state_request` only while linked, and adopts the partner's answer with the
+slow fade.
 
 `test_ota.py` drives `boot.py`'s updater against a stubbed HTTP layer and
 asserts that a network drop, a syntax error, or an HTTP error part-way
