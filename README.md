@@ -152,9 +152,11 @@ The schedule reaches boards two ways: the **retained** `P/alarms` topic, which b
 
 Two requirements: the board needs a **synced clock** (NTP at boot, retried hourly — the heartbeat's `ntp` field reports this, and the web UI warns when it's false), and it needs to have **received the schedule** (the heartbeat's `alarms` count confirms it). Use the **▶ Test** button on any alarm to run its fade immediately and verify the whole path.
 
-### WiFi Watchdog
+### Losing the connection
 
-If the board loses its MQTT connection (WiFi down or broker unreachable) for more than 10 minutes (`WIFI_OFFLINE_REBOOT_MS = 600000`) it reboots to reconnect and pick up any OTA update. Known networks are the `WIFI_NETWORKS` list in `config.py` plus any saved to `networks.json` on flash, tried in order.
+Offline is not a reason to reboot. The public broker pauses now and then and home Wi-Fi drops for a minute; the reconnect loop handles both with exponential backoff (5 s doubling to a 60 s cap), re-joining Wi-Fi first if that went too. Known networks are the `WIFI_NETWORKS` list in `config.py` plus any saved to `networks.json` on flash, tried in order. After 10 minutes offline (`WIFI_CYCLE_AFTER_MS`) the Wi-Fi interface is cycled once — the part of a reboot that actually clears a wedged driver — and that is all; the old 10-minute reboot is gone.
+
+Two quieter failures are caught as well. A TCP connection the broker has given up on raises nothing: writes "succeed" into a dead socket, and a board could believe itself online for hours while hearing nothing. Since every board subscribes to the topic it publishes on, its own 30-second heartbeat comes back as long as the link is alive — so no message at all for `RX_SILENCE_MS` (150 s) means the link is dead, and the client is dropped for the reconnect loop to rebuild. And the broker handshake, which used to block without bound, now carries a 5-second socket timeout (`MQTT_SOCKET_TIMEOUT_S`), so a stalled connect or write raises and is retried instead of hanging the main loop into the 8-second hardware watchdog.
 
 ### State Persistence
 
@@ -164,7 +166,7 @@ Writes are deliberately rationed. The web app includes `on` in every state publi
 
 ### Daily OTA reboot
 
-Each board reboots once a day at **17:00 UTC** (`OTA_HOUR_UTC` in `main.py`) to pull the latest firmware. State (on/off + brightness) is saved before the reboot and restored after, so the lamps come back as they were.
+Each board reboots once a day at **13:00 Zurich time** (`OTA_HOUR_LOCAL` in `main.py`; CET/CEST derived from the board's UTC clock with the EU daylight-saving rule, `zurich_hour()`) to pull the latest firmware. State (on/off, brightness and colour) is saved before the reboot and restored after, so the lamps come back as they were.
 
 ### Resilience layers
 
@@ -179,7 +181,9 @@ The firmware is designed to recover from anything without human intervention:
 | Flash-write rationing | State is written only when it changes, so slider drags can't wear out the flash |
 | Atomic file writes | Power cut mid-write can't corrupt firmware or state/alarm/network files |
 | MQTT input validation | The events topic is on a public broker — every field is validated and clamped before touching the engine or flash; malformed messages are logged and dropped |
-| MQTT watchdog | Broker unreachable > 10 min → reboot to re-establish everything |
+| Reconnect loop | Broker or Wi-Fi gone → retry with backoff; after 10 min the Wi-Fi interface is cycled once. No reboot |
+| Silent-link check | No message heard for 150 s (own heartbeat echo included) → drop and rebuild the connection |
+| Bounded handshake | 5 s socket timeout on the broker connection, so a stall raises instead of tripping the watchdog |
 | NTP retry | Failed clock sync at boot retries hourly (otherwise alarms would silently stay dead until the next reboot) |
 | State persistence | On/off + brightness restored after any reboot |
 | Periodic GC | Heap stays defragmented over weeks of uptime; free memory is reported in every heartbeat |
@@ -541,7 +545,7 @@ stores the fields shown, but another client may store whatever it needs.
 | Touch never fires | Threshold too high | Lower `TOUCH_THRESHOLD` in `config.py` |
 | Touch fires constantly | Missing pull-down | 1 MΩ between GPIO and GND |
 | Boards not syncing | Different topic prefix | `MQTT_TOPIC_PREFIX` must match on both |
-| Board reboots after ~10 min offline | WiFi watchdog | Expected; board reconnects and checks OTA |
+| Board stays offline for a while | Reconnect loop with backoff | Expected; it keeps retrying and cycles Wi-Fi once after 10 min, without rebooting |
 | **Alarm fires at the wrong time** | Alarm times are UTC; older clients sent local time as UTC | Times are now edited in local time and converted. Check the small `HH:MM UTC` hint next to each alarm |
 | **Alarm never fires** | Board has no clock (NTP failed) | The web UI shows a warning banner; heartbeat `ntp` is false. Retries hourly, or reboot the board |
 | **Alarm never fires**, clock is fine | Board never received the schedule | Heartbeat `alarms` count shows 0. Fixed by the retained `P/alarms` topic; press **▶ Test** to confirm the path |

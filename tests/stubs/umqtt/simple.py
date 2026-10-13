@@ -7,7 +7,8 @@ class MQTTClient:
         self.will = None
     def set_callback(self, cb): self._cb = cb
     def set_last_will(self, topic, msg, retain=False): self.will = (topic, msg)
-    def connect(self): pass
+    def connect(self, clean_session=True, timeout=None): self.timeout = timeout
+    def disconnect(self): pass
     def subscribe(self, topic): self.subs.append(topic)
     def publish(self, topic, msg, retain=False):
         published.append((topic, msg, retain))

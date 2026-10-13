@@ -267,6 +267,29 @@ def run():
           str(fw.engine._fade_steps_per))
     check("and scheduled for flash", fw._colour_save_at is not None)
 
+    print("\n=== 13. the daily update runs at 13:00 Zurich time ===")
+    check("13 July 2026 (CEST): 11:00 UTC is 13:00", fw.zurich_hour((2026, 7, 13, 11, 0, 0, 0, 194)) == 13)
+    check("13 January 2026 (CET): 12:00 UTC is 13:00", fw.zurich_hour((2026, 1, 13, 12, 0, 0, 1, 13)) == 13)
+    check("last Sunday of March 2026 is the 29th", fw._last_sunday(2026, 3) == 29)
+    check("last Sunday of October 2026 is the 25th", fw._last_sunday(2026, 10) == 25)
+    check("switch-over: 25 Oct 2026 00:59 UTC is still summer time", fw.zurich_offset_hours((2026, 10, 25, 0, 59, 0, 6, 298)) == 2)
+    check("switch-over: 25 Oct 2026 01:00 UTC is winter time", fw.zurich_offset_hours((2026, 10, 25, 1, 0, 0, 6, 298)) == 1)
+    check("switch-over: 29 Mar 2026 01:00 UTC is summer time", fw.zurich_offset_hours((2026, 3, 29, 1, 0, 0, 6, 88)) == 2)
+    check("OTA hour is 13 local", fw.OTA_HOUR_LOCAL == 13)
+    check("the offline reboot is gone", not hasattr(fw, "WIFI_OFFLINE_REBOOT_MS"))
+
+    print("\n=== 14. a silent link is dropped, not endured ===")
+    now = utime.ticks_ms()
+    fw._last_rx_ms = now
+    check("fresh traffic: alive", fw.link_alive(now))
+    check("quiet for a while: still alive", fw.link_alive(now + fw.RX_SILENCE_MS - 1))
+    check("silent past the limit: dead", not fw.link_alive(now + fw.RX_SILENCE_MS))
+    fw.client.inject(b"test_prefix/events", json.dumps({"from": "board_a", "heartbeat": True}).encode())
+    utime.advance(fw.RX_SILENCE_MS + 5)
+    fw.client.check_msg()
+    check("the board's own echo counts as a sign of life", fw.link_alive(utime.ticks_ms()))
+    check("the broker handshake is bounded", fw.client.timeout == fw.MQTT_SOCKET_TIMEOUT_S, str(fw.client.timeout))
+
     shutil.rmtree(work, ignore_errors=True)
     print()
     if failures:
