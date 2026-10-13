@@ -24,11 +24,29 @@ from config import (
     WEBREPL_PASSWORD,
 )
 
-FIRMWARE_VERSION       = "2026-10-13.1"
+FIRMWARE_VERSION       = "2026-10-13.2"
 FRAME_MS               = 16
 SYNC_INTERVAL_MS       = 60_000
 SYNC_FADE_STEPS        = 300
-WIFI_OFFLINE_REBOOT_MS = 10 * 60 * 1000   # reboot after 10 min offline
+# Offline is not a reason to reboot. The public broker pauses now and then,
+# home Wi-Fi drops for a minute; the reconnect loop below handles both, with
+# backoff. A reboot used to follow after 10 minutes offline — and every
+# reboot (before the colour was persisted) was a warm-white reset. What
+# remains is a soft nudge: after this long offline the Wi-Fi interface is
+# cycled, which clears a wedged driver the way a reboot did, without one.
+WIFI_CYCLE_AFTER_MS    = 10 * 60 * 1000
+# A TCP connection to the broker can go quiet without an error: the broker
+# dropped us, a NAT entry expired, the link paused. Writes still "succeed"
+# into a dead socket, so the board would think it was online for hours and
+# hear nothing. The board subscribes to the topic it publishes on, so its
+# own heartbeat (every 30 s) comes back as long as the link is alive; this
+# long without any message at all means the link is dead, and the client
+# is dropped so the reconnect loop rebuilds it.
+RX_SILENCE_MS          = 150_000
+# Bound for the blocking broker handshake and for a stalled write, so a
+# pause raises an error (handled, reconnect) instead of hanging the main
+# loop into the 8 s hardware watchdog.
+MQTT_SOCKET_TIMEOUT_S  = 5
 # A colour change is written to flash this long after the last one, so a
 # tap or a drag of the palette costs one write, not one per message.
 COLOUR_SAVE_DELAY_MS   = 30_000
@@ -68,6 +86,7 @@ TOPIC_STATUS = (MQTT_TOPIC_PREFIX + "/status/" + BOARD_ID).encode()
 TOPIC_ALARMS = (MQTT_TOPIC_PREFIX + "/alarms").encode()
 
 ntp_ok = False        # module-level so status/heartbeat can report clock health
+_last_rx_ms = None    # ticks_ms of the last message received on any topic
 _test_alarm = None    # set by MQTT test_alarm, consumed by the main loop
 
 # The BOSS re-publishes its state every 60 s so the lamps converge. That
@@ -282,6 +301,8 @@ def on_message(topic, msg):
     """Called by the MQTT library when a message arrives.
     Must NEVER raise — an exception here tears down the MQTT connection,
     so a single bad message could trigger a reconnect storm."""
+    global _last_rx_ms
+    _last_rx_ms = utime.ticks_ms()    # anything at all, our own echo included
     try:
         data = ujson.loads(msg)
     except Exception:
@@ -437,7 +458,10 @@ def connect_mqtt() -> MQTTClient:
     )
     c.set_callback(on_message)
     c.set_last_will(TOPIC_STATUS, b'{"online": false}', retain=True)
-    c.connect()
+    try:
+        c.connect(timeout=MQTT_SOCKET_TIMEOUT_S)
+    except TypeError:
+        c.connect()                   # older umqtt without a timeout argument
     c.subscribe(TOPIC_EVENTS)
     c.subscribe(TOPIC_ALARMS)   # retained → schedule redelivered on every connect
     c.publish(TOPIC_STATUS,
@@ -445,7 +469,31 @@ def connect_mqtt() -> MQTTClient:
                            "ntp": ntp_ok}),
               retain=True)
     print(f"[mqtt] connected — client_id={client_id}, topic={TOPIC_EVENTS}")
+    global _last_rx_ms
+    _last_rx_ms = utime.ticks_ms()
     return c
+
+
+def link_alive(now):
+    """False once the link has been silent for RX_SILENCE_MS: the board's
+    own heartbeat echo is due every 30 s, so a long silence is a dead
+    socket, not a quiet room."""
+    if client is None or _last_rx_ms is None:
+        return True
+    return utime.ticks_diff(now, _last_rx_ms) < RX_SILENCE_MS
+
+
+def cycle_wifi():
+    """Drop and re-raise the Wi-Fi interface: the part of a reboot that
+    actually helps a stuck connection, without the reboot."""
+    try:
+        wlan = network.WLAN(network.STA_IF)
+        wlan.active(False)
+        utime.sleep_ms(500)
+        wlan.active(True)
+        print("[wifi] interface cycled")
+    except Exception as e:
+        print(f"[wifi] cycle failed: {e}")
 
 
 def publish_event(payload: dict):
@@ -461,7 +509,34 @@ def publish_event(payload: dict):
         client = None   # trigger reconnect
 
 
-OTA_HOUR_UTC = 17   # 5 pm UTC — daily reboot triggers boot.py OTA
+# The daily update reboot runs at this local hour, Zurich time (CET/CEST),
+# derived from the board's UTC clock with the EU daylight-saving rule.
+OTA_HOUR_LOCAL = 13
+
+def _last_sunday(year, month):
+    """Day of the month of the last Sunday (UTC calendar), via utime."""
+    # Day 31 of March / October always exists; walk back to a Sunday.
+    for day in range(31, 24, -1):
+        t = utime.mktime((year, month, day, 0, 0, 0, 0, 0))
+        if utime.localtime(t)[6] == 6:     # weekday: Monday = 0
+            return day
+    return 25
+
+def zurich_offset_hours(t=None):
+    """UTC offset for Europe/Zurich: +1 (CET), +2 during EU summer time,
+    which runs from 01:00 UTC on the last Sunday of March to 01:00 UTC on
+    the last Sunday of October."""
+    t = utime.localtime() if t is None else t
+    year, month, day, hour = t[0], t[1], t[2], t[3]
+    start = _last_sunday(year, 3)
+    end   = _last_sunday(year, 10)
+    after_start = (month > 3) or (month == 3 and (day > start or (day == start and hour >= 1)))
+    before_end  = (month < 10) or (month == 10 and (day < end or (day == end and hour < 1)))
+    return 2 if (after_start and before_end) else 1
+
+def zurich_hour(t=None):
+    t = utime.localtime() if t is None else t
+    return (t[3] + zurich_offset_hours(t)) % 24
 
 STATE_FILE  = "state.json"
 ALARM_FILE  = "alarms.json"
@@ -715,7 +790,8 @@ def main():
     if _was_rolled_back:
         print("[boot] running RESTORED firmware — a previous version crash-looped")
     _backoff_ms     = RECONNECT_DELAY_MS
-    _offline_since  = None   # when client first became None (WiFi watchdog)
+    _offline_since  = None   # when client first became None
+    _wifi_cycled    = False  # the interface was cycled during this outage
 
     while True:
         now = utime.ticks_ms()
@@ -760,14 +836,25 @@ def main():
                 print(f"[mqtt] check_msg error: {e}")
                 client = None
 
-        # ── WiFi watchdog — reboot if offline > 10 min ──
+        # ── Silent link — a socket the broker gave up on raises nothing ──
+        if client is not None and not link_alive(now):
+            print("[mqtt] nothing heard for a while — dropping the link to rebuild it")
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+            client = None
+            _reconnect_at = now
+
+        # ── Long outage — cycle the Wi-Fi interface once, never reboot ──
         if client is None:
             if _offline_since is None:
                 _offline_since = now
-            elif utime.ticks_diff(now, _offline_since) >= WIFI_OFFLINE_REBOOT_MS:
-                print("[wifi] offline > 10 min — rebooting to recover connection")
-                save_state()
-                machine.reset()
+                _wifi_cycled = False
+            elif not _wifi_cycled and utime.ticks_diff(now, _offline_since) >= WIFI_CYCLE_AFTER_MS:
+                _wifi_cycled = True
+                print("[wifi] offline > 10 min — cycling the interface")
+                cycle_wifi()
         else:
             _offline_since = None
 
@@ -823,11 +910,11 @@ def main():
             ntp_ok = sync_ntp()
             _ntp_retry_at = utime.ticks_add(now, 3_600_000)
 
-        # ── Daily OTA reboot at OTA_HOUR_UTC — save state first ──
+        # ── Daily OTA reboot at OTA_HOUR_LOCAL (Zurich) — save state first ──
         if ntp_ok:
             t = utime.localtime()
             cur_min = t[4]  # minute within hour
-            if t[3] == OTA_HOUR_UTC and cur_min != _ota_check_min:
+            if zurich_hour(t) == OTA_HOUR_LOCAL and cur_min != _ota_check_min:
                 _ota_check_min = cur_min
                 if cur_min == 0:
                     print("[ota] daily maintenance window — saving state and rebooting for OTA")
